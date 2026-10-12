@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// Run executes UDP latency probes then TCP throughput against target.
+// Run executes the configured mode against target.
 // Target may be "host" or "host:port"; the default port is DefaultPort.
 func Run(ctx context.Context, cfg Config) (Result, error) {
 	if err := cfg.Normalize(); err != nil {
@@ -20,44 +20,65 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	switch cfg.Mode {
+	case ModeStream:
+		return runStream(ctx, addr, cfg)
+	case ModeMTU:
+		return runMTU(ctx, addr, cfg)
+	default:
+		return runThroughput(ctx, addr, cfg)
+	}
+}
+
+func runThroughput(ctx context.Context, addr string, cfg Config) (Result, error) {
 	started := time.Now()
 	res := Result{
+		Mode:      ModeThroughput,
 		Target:    addr,
 		Duration:  cfg.Duration.Seconds(),
+		Direction: cfg.Direction,
+		Streams:   cfg.Streams,
 		StartedAt: started,
 	}
 
+	cfg.Progress.setBidir(cfg.Direction == DirBidir)
+	cfg.Progress.beginLatency(cfg.Probes, cfg.ProbeTimeout)
 	lat, err := probeUDP(ctx, addr, cfg)
 	if err != nil {
 		return Result{}, fmt.Errorf("udp probes: %w", err)
 	}
+	cfg.Progress.endLatency()
 	res.Latency = lat
 
+	// Each group runs its directions concurrently; groups run in order.
+	var groups [][]Direction
 	switch cfg.Direction {
 	case DirUpload:
-		up, err := tcpBulk(ctx, addr, cfg, cmdUpload)
-		if err != nil {
-			return Result{}, fmt.Errorf("upload: %w", err)
-		}
-		res.Upload = up
+		groups = [][]Direction{{DirUpload}}
 	case DirDownload:
-		dn, err := tcpBulk(ctx, addr, cfg, cmdDownload)
-		if err != nil {
-			return Result{}, fmt.Errorf("download: %w", err)
-		}
-		res.Download = dn
+		groups = [][]Direction{{DirDownload}}
 	case DirBoth:
-		up, err := tcpBulk(ctx, addr, cfg, cmdUpload)
-		if err != nil {
-			return Result{}, fmt.Errorf("upload: %w", err)
-		}
-		res.Upload = up
-		dn, err := tcpBulk(ctx, addr, cfg, cmdDownload)
-		if err != nil {
-			return Result{}, fmt.Errorf("download: %w", err)
-		}
-		res.Download = dn
+		groups = [][]Direction{{DirUpload}, {DirDownload}}
+	case DirBidir:
+		groups = [][]Direction{{DirUpload, DirDownload}}
 	}
+	for _, dirs := range groups {
+		ts, err := tcpBulk(ctx, addr, cfg, dirs...)
+		if err != nil {
+			return Result{}, err
+		}
+		for _, t := range ts {
+			if t.Direction == DirUpload {
+				res.Upload = t
+			} else {
+				res.Download = t
+			}
+		}
+	}
+	if res.Upload != nil && res.Download != nil && cfg.Direction == DirBidir {
+		res.Total = totalOf(res.Upload, res.Download)
+	}
+	cfg.Progress.done()
 	res.FinishedAt = time.Now()
 	return res, nil
 }
@@ -91,6 +112,7 @@ func probeUDP(ctx context.Context, addr string, cfg Config) (Latency, error) {
 		rtt time.Duration
 		ok  bool
 	}
+	prog := cfg.Progress
 	replies := make(chan reply, cfg.Probes)
 	done := make(chan struct{})
 	var wg sync.WaitGroup
@@ -98,6 +120,7 @@ func probeUDP(ctx context.Context, addr string, cfg Config) (Latency, error) {
 	go func() {
 		defer wg.Done()
 		buf := make([]byte, 64)
+		var recent []time.Duration
 		for {
 			select {
 			case <-done:
@@ -118,6 +141,16 @@ func probeUDP(ctx context.Context, addr string, cfg Config) (Latency, error) {
 			rtt := time.Since(time.Unix(0, sendNano))
 			if rtt < 0 {
 				rtt = 0
+			}
+			if prog.probeRecv(seq, rtt) {
+				if len(recent) == rttWindow {
+					copy(recent, recent[1:])
+					recent = recent[:rttWindow-1]
+				}
+				recent = append(recent, rtt)
+				if j, ok := jitterMs(recent); ok {
+					prog.setJitter(j)
+				}
 			}
 			select {
 			case replies <- reply{seq: seq, rtt: rtt, ok: true}:
@@ -141,6 +174,7 @@ func probeUDP(ctx context.Context, addr string, cfg Config) (Latency, error) {
 			wg.Wait()
 			return Latency{}, err
 		}
+		prog.probeSent(i, now)
 		if i+1 < cfg.Probes {
 			select {
 			case <-ctx.Done():
@@ -181,43 +215,86 @@ collect:
 	return latencyFromRTTs(cfg.Probes, len(rtts), rtts), nil
 }
 
-func tcpBulk(ctx context.Context, addr string, cfg Config, cmd byte) (*Throughput, error) {
-	var total atomic.Uint64
-	var wg sync.WaitGroup
-	errCh := make(chan error, cfg.Streams)
-	start := time.Now()
-	for i := 0; i < cfg.Streams; i++ {
-		wg.Add(1)
+// tcpBulk runs cfg.Streams connections for every dir at once and returns one
+// Throughput per dir, in order. All connections are dialed before any header
+// is sent, so every direction starts its window at the same instant.
+func tcpBulk(ctx context.Context, addr string, cfg Config, dirs ...Direction) ([]*Throughput, error) {
+	conns := make([]net.Conn, len(dirs)*cfg.Streams)
+	dialErrs := make([]error, len(conns))
+	var dialed sync.WaitGroup
+	for i := range conns {
+		dialed.Add(1)
 		go func() {
-			defer wg.Done()
-			n, err := tcpStream(ctx, addr, cfg, cmd)
-			total.Add(n)
-			if err != nil {
-				errCh <- err
-			}
+			defer dialed.Done()
+			var d net.Dialer
+			conns[i], dialErrs[i] = d.DialContext(ctx, "tcp", addr)
 		}()
 	}
-	wg.Wait()
-	close(errCh)
-	for err := range errCh {
+	dialed.Wait()
+	for i, err := range dialErrs {
 		if err != nil {
-			return nil, err
+			for _, c := range conns {
+				if c != nil {
+					_ = c.Close()
+				}
+			}
+			return nil, fmt.Errorf("%s: %w", dirs[i/cfg.Streams], err)
 		}
 	}
-	elapsed := time.Since(start)
-	dir := DirUpload
-	if cmd == cmdDownload {
-		dir = DirDownload
+
+	lives := make([]*atomic.Uint64, len(dirs))
+	for i, dir := range dirs {
+		lives[i] = cfg.Progress.beginTCP(dir, cfg.Duration, cfg.Streams)
 	}
-	return throughputOf(dir, total.Load(), elapsed, cfg.Streams), nil
+	if len(dirs) > 1 {
+		cfg.Progress.setPhase(PhaseBidir)
+	} else {
+		cfg.Progress.setPhase(phaseOf(dirs[0]))
+	}
+
+	start := time.Now()
+	out := make([]*Throughput, len(dirs))
+	errCh := make(chan error, len(conns))
+	var all sync.WaitGroup
+	for i, dir := range dirs {
+		cmd := cmdUpload
+		if dir == DirDownload {
+			cmd = cmdDownload
+		}
+		var total atomic.Uint64
+		var streams sync.WaitGroup
+		for _, conn := range conns[i*cfg.Streams : (i+1)*cfg.Streams] {
+			streams.Add(1)
+			go func() {
+				defer streams.Done()
+				n, err := tcpStream(ctx, conn, cfg, cmd, lives[i])
+				total.Add(n)
+				if err != nil {
+					errCh <- fmt.Errorf("%s: %w", dir, err)
+				}
+			}()
+		}
+		all.Add(1)
+		go func() {
+			defer all.Done()
+			streams.Wait()
+			end := time.Now()
+			cfg.Progress.endTCP(dir)
+			out[i] = throughputOf(dir, total.Load(), start, end, cfg.Streams)
+		}()
+	}
+	all.Wait()
+	close(errCh)
+	if err := <-errCh; err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
-func tcpStream(ctx context.Context, addr string, cfg Config, cmd byte) (uint64, error) {
-	var d net.Dialer
-	conn, err := d.DialContext(ctx, "tcp", addr)
-	if err != nil {
-		return 0, err
-	}
+// tcpStream runs one bulk stream on conn and closes it. live, when non-nil,
+// is bumped per syscall so a renderer can sample it; the returned count is
+// what the result uses.
+func tcpStream(ctx context.Context, conn net.Conn, cfg Config, cmd byte, live *atomic.Uint64) (uint64, error) {
 	defer conn.Close()
 
 	h := tcpHeader{
@@ -241,6 +318,9 @@ func tcpStream(ctx context.Context, addr string, cfg Config, cmd byte) (uint64, 
 			}
 			nw, err := conn.Write(buf)
 			n += uint64(nw)
+			if live != nil {
+				live.Add(uint64(nw))
+			}
 			if err != nil {
 				if time.Now().After(end) {
 					return n, nil
@@ -256,6 +336,9 @@ func tcpStream(ctx context.Context, addr string, cfg Config, cmd byte) (uint64, 
 			}
 			nr, err := conn.Read(buf)
 			n += uint64(nr)
+			if live != nil {
+				live.Add(uint64(nr))
+			}
 			if err != nil {
 				if err == io.EOF || time.Now().After(end) {
 					return n, nil

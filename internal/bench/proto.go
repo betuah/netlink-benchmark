@@ -11,9 +11,20 @@ const (
 	cmdDownload byte = 'D'
 	cmdProbe    byte = 'P'
 	cmdReply    byte = 'R'
+	// Stream handshake / CBR data (UDP).
+	cmdStreamHello byte = 'H'
+	cmdStreamAck   byte = 'A'
+	cmdStreamData  byte = 'S'
+	cmdStreamEcho  byte = 'T'
+	// Path MTU probes (UDP).
+	cmdMTUProbe byte = 'M'
+	cmdMTUReply byte = 'N'
 
-	tcpHeaderSize = 16
-	udpPacketSize = 17
+	tcpHeaderSize    = 16
+	udpPacketSize    = 17
+	streamHelloSize  = 21
+	mtuHeaderSize    = 13
+	maxUDPReadBuffer = 65535
 )
 
 // tcpHeader is the first frame on a TCP bench stream.
@@ -74,4 +85,74 @@ func decodeUDP(b []byte) (kind byte, seq uint32, sendNano int64, err error) {
 	seq = binary.BigEndian.Uint32(b[5:9])
 	sendNano = int64(binary.BigEndian.Uint64(b[9:17]))
 	return kind, seq, sendNano, nil
+}
+
+// streamHello: Magic[4] 'H' DurationMs[4] PacketSize[4] BitrateBps[8]
+func encodeStreamHello(durationMs, packetSize uint32, bitrateBps uint64) []byte {
+	buf := make([]byte, streamHelloSize)
+	copy(buf[:4], Magic)
+	buf[4] = cmdStreamHello
+	binary.BigEndian.PutUint32(buf[5:9], durationMs)
+	binary.BigEndian.PutUint32(buf[9:13], packetSize)
+	binary.BigEndian.PutUint64(buf[13:21], bitrateBps)
+	return buf
+}
+
+func decodeStreamHello(b []byte) (durationMs, packetSize uint32, bitrateBps uint64, err error) {
+	if len(b) < streamHelloSize {
+		return 0, 0, 0, fmt.Errorf("short stream hello")
+	}
+	if string(b[:4]) != Magic || b[4] != cmdStreamHello {
+		return 0, 0, 0, fmt.Errorf("not a stream hello")
+	}
+	durationMs = binary.BigEndian.Uint32(b[5:9])
+	packetSize = binary.BigEndian.Uint32(b[9:13])
+	bitrateBps = binary.BigEndian.Uint64(b[13:21])
+	return durationMs, packetSize, bitrateBps, nil
+}
+
+func encodeStreamAck() []byte {
+	buf := make([]byte, 5)
+	copy(buf[:4], Magic)
+	buf[4] = cmdStreamAck
+	return buf
+}
+
+// encodeStreamData builds a CBR datagram of exactly size bytes (header + pad).
+func encodeStreamData(seq uint32, sendNano int64, size int) []byte {
+	if size < udpPacketSize {
+		size = udpPacketSize
+	}
+	buf := make([]byte, size)
+	copy(buf[:4], Magic)
+	buf[4] = cmdStreamData
+	binary.BigEndian.PutUint32(buf[5:9], seq)
+	binary.BigEndian.PutUint64(buf[9:17], uint64(sendNano))
+	return buf
+}
+
+// mtuPacket: Magic[4] 'M'/'N' Seq[4] TotalLen[4] + optional pad to TotalLen
+func encodeMTU(kind byte, seq uint32, totalLen int) []byte {
+	if totalLen < mtuHeaderSize {
+		totalLen = mtuHeaderSize
+	}
+	buf := make([]byte, totalLen)
+	copy(buf[:4], Magic)
+	buf[4] = kind
+	binary.BigEndian.PutUint32(buf[5:9], seq)
+	binary.BigEndian.PutUint32(buf[9:13], uint32(totalLen))
+	return buf
+}
+
+func decodeMTU(b []byte) (kind byte, seq uint32, totalLen uint32, err error) {
+	if len(b) < mtuHeaderSize {
+		return 0, 0, 0, fmt.Errorf("short mtu packet")
+	}
+	if string(b[:4]) != Magic {
+		return 0, 0, 0, fmt.Errorf("bad magic")
+	}
+	kind = b[4]
+	seq = binary.BigEndian.Uint32(b[5:9])
+	totalLen = binary.BigEndian.Uint32(b[9:13])
+	return kind, seq, totalLen, nil
 }

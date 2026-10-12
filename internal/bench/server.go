@@ -12,6 +12,9 @@ import (
 // Server accepts TCP bulk streams and UDP echo probes on the same address.
 type Server struct {
 	Addr string
+	// Logf, when set, gets one line per finished TCP stream and per new UDP
+	// probe source. It is never called per packet.
+	Logf func(format string, args ...any)
 
 	ln   net.Listener
 	pc   net.PacketConn
@@ -115,27 +118,45 @@ func (s *Server) handleTCP(ctx context.Context, conn net.Conn) {
 		dur = 10 * time.Second
 	}
 	buf := make([]byte, payload)
+	start := time.Now()
+	var n int64
+	phase := DirUpload
 	switch h.Cmd {
 	case cmdUpload:
 		deadline := time.Now().Add(dur + 5*time.Second)
 		_ = conn.SetReadDeadline(deadline)
-		_, _ = io.Copy(io.Discard, conn)
+		n, _ = io.Copy(io.Discard, conn)
 	case cmdDownload:
+		phase = DirDownload
 		_ = conn.SetWriteDeadline(time.Now().Add(dur + 5*time.Second))
 		end := time.Now().Add(dur)
-		for time.Now().Before(end) {
-			if ctx.Err() != nil {
-				return
-			}
-			if _, err := conn.Write(buf); err != nil {
-				return
+		for time.Now().Before(end) && ctx.Err() == nil {
+			nw, err := conn.Write(buf)
+			n += int64(nw)
+			if err != nil {
+				break
 			}
 		}
 	}
+	if s.Logf != nil {
+		el := time.Since(start).Seconds()
+		mbps := 0.0
+		if el > 0 {
+			mbps = Mbps(float64(n) / el)
+		}
+		s.Logf("session remote=%s phase=%s bytes=%d elapsed=%.2fs mbps=%.2f",
+			conn.RemoteAddr(), phase, n, el, mbps)
+	}
 }
 
+const udpSessionIdle = 10 * time.Second
+
 func (s *Server) serveUDP(ctx context.Context) error {
-	buf := make([]byte, 64)
+	buf := make([]byte, maxUDPReadBuffer)
+	var seen map[string]time.Time
+	if s.Logf != nil {
+		seen = make(map[string]time.Time)
+	}
 	for {
 		_ = s.pc.SetReadDeadline(time.Now().Add(time.Second))
 		n, addr, err := s.pc.ReadFrom(buf)
@@ -148,12 +169,62 @@ func (s *Server) serveUDP(ctx context.Context) error {
 			}
 			return err
 		}
-		kind, seq, sendNano, err := decodeUDP(buf[:n])
-		if err != nil || kind != cmdProbe {
+		if n < 5 || string(buf[:4]) != Magic {
 			continue
 		}
-		reply := encodeUDP(cmdReply, seq, sendNano)
-		_, _ = s.pc.WriteTo(reply, addr)
+		switch buf[4] {
+		case cmdProbe:
+			kind, seq, sendNano, err := decodeUDP(buf[:n])
+			if err != nil || kind != cmdProbe {
+				continue
+			}
+			reply := encodeUDP(cmdReply, seq, sendNano)
+			_, _ = s.pc.WriteTo(reply, addr)
+			if seen != nil {
+				s.noteUDP(seen, addr.String(), "latency")
+			}
+		case cmdStreamHello:
+			_, _ = s.pc.WriteTo(encodeStreamAck(), addr)
+			if seen != nil {
+				s.noteUDP(seen, addr.String(), "stream")
+			}
+		case cmdStreamData:
+			kind, seq, sendNano, err := decodeUDP(buf[:n])
+			if err != nil || kind != cmdStreamData {
+				continue
+			}
+			// Echo header only so high CBR does not double the path load.
+			_, _ = s.pc.WriteTo(encodeUDP(cmdStreamEcho, seq, sendNano), addr)
+		case cmdMTUProbe:
+			kind, seq, totalLen, err := decodeMTU(buf[:n])
+			if err != nil || kind != cmdMTUProbe {
+				continue
+			}
+			if int(totalLen) != n && totalLen != 0 {
+				// Still reply if the datagram arrived intact enough to decode.
+			}
+			_, _ = s.pc.WriteTo(encodeMTU(cmdMTUReply, seq, mtuHeaderSize), addr)
+			if seen != nil {
+				s.noteUDP(seen, addr.String(), "mtu")
+			}
+		}
+	}
+}
+
+func (s *Server) noteUDP(seen map[string]time.Time, key, phase string) {
+	now := time.Now()
+	last, ok := seen[key+"|"+phase]
+	seen[key+"|"+phase] = now
+	if ok && now.Sub(last) < udpSessionIdle {
+		return
+	}
+	s.Logf("session remote=%s phase=%s udp started", key, phase)
+	if len(seen) > 1024 {
+		for k, t := range seen {
+			if now.Sub(t) >= udpSessionIdle {
+				delete(seen, k)
+			}
+		}
 	}
 }
 
