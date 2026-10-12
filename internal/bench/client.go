@@ -21,6 +21,8 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		return Result{}, err
 	}
 	switch cfg.Mode {
+	case ModeAll:
+		return runAll(ctx, addr, cfg)
 	case ModeStream:
 		return runStream(ctx, addr, cfg)
 	case ModeMTU:
@@ -28,6 +30,60 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 	default:
 		return runThroughput(ctx, addr, cfg)
 	}
+}
+
+func runAll(ctx context.Context, addr string, cfg Config) (Result, error) {
+	started := time.Now()
+	logf := cfg.Logf
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+
+	logf("phase 1/3: throughput (UDP latency + TCP)")
+	tp, err := runThroughput(ctx, addr, cfg)
+	if err != nil {
+		return Result{}, err
+	}
+
+	logf("phase 2/3: stream stability (UDP CBR)")
+	st, err := runStream(ctx, addr, cfg)
+	if err != nil {
+		return Result{}, err
+	}
+
+	logf("phase 3/3: path MTU discovery")
+	mt, err := runMTU(ctx, addr, cfg)
+	if err != nil {
+		return Result{}, err
+	}
+
+	res := Result{
+		Mode:   ModeAll,
+		Target: addr,
+		Throughput: &ThroughputPhase{
+			Duration:  tp.Duration,
+			Direction: tp.Direction,
+			Streams:   tp.Streams,
+			Latency:   tp.Latency,
+			Upload:    tp.Upload,
+			Download:  tp.Download,
+			Total:     tp.Total,
+		},
+		// Flat copies so Format/helpers can reuse throughput sections.
+		Duration:   tp.Duration,
+		Direction:  tp.Direction,
+		Streams:    tp.Streams,
+		Latency:    tp.Latency,
+		Upload:     tp.Upload,
+		Download:   tp.Download,
+		Total:      tp.Total,
+		Stream:     st.Stream,
+		MTU:        mt.MTU,
+		StartedAt:  started,
+		FinishedAt: time.Now(),
+	}
+	cfg.Progress.done()
+	return res, nil
 }
 
 func runThroughput(ctx context.Context, addr string, cfg Config) (Result, error) {

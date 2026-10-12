@@ -17,6 +17,7 @@ func TestBidirRunsBothDirectionsAtOnce(t *testing.T) {
 	out := &syncBuffer{}
 	live := report.StartLive(out, prog, report.LiveOptions{TTY: false, Interval: 20 * time.Millisecond})
 	res, err := bench.Run(context.Background(), bench.Config{
+		Mode:          bench.ModeThroughput,
 		Target:        s.Addr,
 		Duration:      dur,
 		Streams:       2,
@@ -102,6 +103,7 @@ func TestBidirTTYLine(t *testing.T) {
 	out := &syncBuffer{}
 	live := report.StartLive(out, prog, report.LiveOptions{TTY: true, Interval: 20 * time.Millisecond})
 	_, err := bench.Run(context.Background(), bench.Config{
+		Mode:          bench.ModeThroughput,
 		Target:        s.Addr,
 		Duration:      300 * time.Millisecond,
 		Streams:       1,

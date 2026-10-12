@@ -41,13 +41,32 @@ const (
 type Mode string
 
 const (
-	// ModeThroughput is UDP latency probes then TCP bulk (default).
+	// ModeAll runs throughput, then stream, then MTU (CLI default).
+	ModeAll Mode = "all"
+	// ModeThroughput is UDP latency probes then TCP bulk.
 	ModeThroughput Mode = "throughput"
 	// ModeStream sends constant-bitrate UDP (video/RTSP-like stress).
 	ModeStream Mode = "stream"
 	// ModeMTU discovers the path MTU over the npbench UDP path.
 	ModeMTU Mode = "mtu"
 )
+
+// ParseMode maps a CLI/API mode string to Mode.
+// Empty and "all" mean ModeAll; "tcp" is an alias for throughput.
+func ParseMode(s string) (Mode, error) {
+	switch Mode(s) {
+	case "", ModeAll:
+		return ModeAll, nil
+	case ModeThroughput, "tcp":
+		return ModeThroughput, nil
+	case ModeStream:
+		return ModeStream, nil
+	case ModeMTU:
+		return ModeMTU, nil
+	default:
+		return "", fmt.Errorf("mode must be all, throughput, stream, or mtu")
+	}
+}
 
 // Direction selects which TCP bulk phases run.
 type Direction string
@@ -89,6 +108,8 @@ type Config struct {
 	LateMs int
 	// Progress, when set, receives live counters while Run measures.
 	Progress *Progress
+	// Logf, when set, receives human phase banners (used by ModeAll).
+	Logf func(format string, args ...any)
 }
 
 // Normalize fills defaults and rejects empty targets.
@@ -96,14 +117,11 @@ func (c *Config) Normalize() error {
 	if c.Target == "" {
 		return fmt.Errorf("target is required")
 	}
-	if c.Mode == "" {
-		c.Mode = ModeThroughput
+	m, err := ParseMode(string(c.Mode))
+	if err != nil {
+		return err
 	}
-	switch c.Mode {
-	case ModeThroughput, ModeStream, ModeMTU:
-	default:
-		return fmt.Errorf("mode must be throughput, stream, or mtu")
-	}
+	c.Mode = m
 	if c.Duration <= 0 {
 		c.Duration = 10 * time.Second
 	}
@@ -228,6 +246,18 @@ type MTU struct {
 	Note              string `json:"note,omitempty"`
 }
 
+// ThroughputPhase is the nested throughput block used when Mode is all.
+type ThroughputPhase struct {
+	Duration  float64     `json:"duration_sec,omitempty"`
+	Direction Direction   `json:"direction,omitempty"`
+	Streams   int         `json:"streams,omitempty"`
+	Latency   Latency     `json:"latency"`
+	Upload    *Throughput `json:"upload,omitempty"`
+	Download  *Throughput `json:"download,omitempty"`
+	// Total is set only for DirBidir.
+	Total *Throughput `json:"total,omitempty"`
+}
+
 // Result is the full client report.
 type Result struct {
 	Mode      Mode        `json:"mode"`
@@ -240,11 +270,13 @@ type Result struct {
 	Download  *Throughput `json:"download,omitempty"`
 	// Total is set only for DirBidir: bytes and rates of both directions
 	// summed over their shared window; Streams counts all connections.
-	Total      *Throughput `json:"total,omitempty"`
-	Stream     *Stream     `json:"stream,omitempty"`
-	MTU        *MTU        `json:"mtu,omitempty"`
-	StartedAt  time.Time   `json:"started_at"`
-	FinishedAt time.Time   `json:"finished_at"`
+	Total *Throughput `json:"total,omitempty"`
+	// Throughput nests latency+TCP when Mode is all (avoids flat duplication in JSON).
+	Throughput *ThroughputPhase `json:"throughput,omitempty"`
+	Stream     *Stream          `json:"stream,omitempty"`
+	MTU        *MTU             `json:"mtu,omitempty"`
+	StartedAt  time.Time        `json:"started_at"`
+	FinishedAt time.Time        `json:"finished_at"`
 }
 
 // Mbps converts bytes per second to megabits per second.

@@ -55,6 +55,7 @@ func runWithLive(t *testing.T, addr string, opt report.LiveOptions) (bench.Resul
 	out := &syncBuffer{}
 	live := report.StartLive(out, prog, opt)
 	res, err := bench.Run(context.Background(), bench.Config{
+		Mode:          bench.ModeThroughput,
 		Target:        addr,
 		Duration:      300 * time.Millisecond,
 		Streams:       2,

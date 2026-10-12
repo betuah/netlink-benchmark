@@ -19,17 +19,26 @@ Pastikan overlay sudah terhubung (`GET /v1/status` → `connected`). Target paka
 ./bin/npbench -listen :9201
 ```
 
-### Throughput (default)
+### Semua fase (default)
+
+Tanpa `-mode` (atau `-mode all`) menjalankan **berurutan**: throughput (UDP latency + TCP) → stream stability → path MTU, lalu satu laporan gabungan. Flag `-bitrate` / `-packet` / `-late-ms` hanya mempengaruhi fase stream; flag TCP (`-streams`, `-direction`, …) hanya fase throughput.
+
+```bash
+./bin/npbench -target 100.64.0.1
+./bin/npbench -target 100.64.0.1 -duration 10s -streams 2 -bitrate 5M
+./bin/npbench -target 100.64.0.1 -json
+```
+
+### Throughput saja
 
 UDP latency probes, lalu TCP upload/download:
 
 ```bash
-./bin/npbench -target 100.64.0.1 -duration 10s -streams 2
-./bin/npbench -target 100.64.0.1 -duration 10s -streams 2 -direction bidir
-./bin/npbench -target 100.64.0.1 -json
+./bin/npbench -target 100.64.0.1 -mode throughput -duration 10s -streams 2
+./bin/npbench -target 100.64.0.1 -mode throughput -duration 10s -streams 2 -direction bidir
 ```
 
-### Stream stability (video / RTSP-like)
+### Stream stability saja (video / RTSP-like — bukan protokol RTSP)
 
 `npbench` **tidak** membuka sesi RTSP dan **tidak** berbicara protokol kamera/NVR. Mode ini hanya mengirim UDP constant-bitrate (CBR) di jalur overlay — pola traffic yang mirip RTP/UDP video (mis. chunk MPEG-TS 7×188 = 1316 byte). Pakai sebelum deploy kamera/NVR lewat tunnel untuk melihat loss, jitter, burst, dan paket “late”.
 
@@ -67,12 +76,12 @@ Perkiraan IP MTU = UDP payload + 28 (IPv4) atau + 48 (IPv6). Bandingkan dengan h
 |------|---------|------|-----------|
 | `-listen` | kosong | listen | Alamat TCP+UDP yang di-listen (mis. `:9201`). Jika diisi, npbench jalan sebagai server; kosong = client. |
 | `-target` | kosong (wajib) | client | Host atau `host:port` peer (IP overlay / Magic DNS). Tanpa port → `9201`. |
-| `-mode` | `throughput` | client | `throughput` (latency UDP + TCP), `stream` (UDP CBR), `mtu` (path MTU). |
-| `-duration` | `10s` | throughput / stream | Lama transfer TCP **per arah**, atau lama kirim CBR di mode stream. |
+| `-mode` | `all` | client | `all` (default: throughput → stream → mtu), `throughput`/`tcp` (latency UDP + TCP), `stream` (UDP CBR, **bukan** RTSP), `mtu`. |
+| `-duration` | `10s` | throughput / stream | Lama transfer TCP **per arah**, dan lama kirim CBR di fase/mode stream. |
 | `-streams` | `1` | throughput | Jumlah koneksi TCP paralel **per arah**. |
 | `-payload` | `65536` | throughput | Ukuran chunk tiap `write`/`read` TCP (byte); server memakai nilai yang sama, maks 4 MiB. |
 | `-packet` | `1316` | stream | Ukuran datagram UDP CBR (byte). 1316 = 7×188 MPEG-TS; 1200 lebih aman di bawah MTU overlay. |
-| `-bitrate` | `5M` | stream | Target CBR: `5M`, `5000k`, `5Mbps`, atau bps mentah. |
+| `-bitrate` | `5M` | stream | Target CBR: `5M`, `5000k`, `5Mbps`, atau bps mentah (fase stream di `all` juga). |
 | `-late-ms` | `150` | stream | Echo RTT di atas nilai ini dihitung sebagai late (playback budget). |
 | `-direction` | `both` | throughput | `upload`, `download`, `both` (berurutan), `bidir` (bersamaan). |
 | `-probes` | `50` | throughput | Jumlah probe UDP echo untuk RTT / loss / jitter. |
@@ -84,7 +93,7 @@ Perkiraan IP MTU = UDP payload + 28 (IPv4) atau + 48 (IPv6). Bandingkan dengan h
 
 **`-streams N`** membuka N koneksi TCP sekaligus untuk setiap arah yang diukur, lalu menjumlahkan byte-nya (sama seperti `iperf3 -P N`). `both` dengan `-streams 2` = 2 koneksi upload, lalu 2 koneksi download; `bidir` dengan `-streams 2` = 4 koneksi aktif bersamaan (2 upload + 2 download). Satu koneksi TCP dibatasi oleh window/RTT dan langsung menurunkan laju saat ada loss; di jalur dengan latency tinggi atau loss, beberapa koneksi paralel mengisi pipa lebih penuh, sehingga hasilnya lebih dekat ke kapasitas link. Di LAN atau loopback, 1–2 stream biasanya sudah cukup.
 
-Di mode `throughput`, fase UDP latency selalu jalan dulu, baru fase TCP. Di `bidir` semua koneksi di-dial dulu, lalu semua stream mulai dari titik start yang sama. Server tidak perlu mode khusus: stream/mtu memakai tipe pesan UDP baru; client lama tetap kompatibel untuk throughput.
+Default `all` menjalankan ketiga fase berurutan dan mencetak laporan gabungan. Di fase/mode `throughput`, UDP latency selalu jalan dulu, baru TCP. Di `bidir` semua koneksi di-dial dulu, lalu semua stream mulai dari titik start yang sama. Server tidak perlu mode khusus: stream/mtu memakai tipe pesan UDP baru; client lama tetap kompatibel untuk throughput.
 
 ## Progress & laporan
 

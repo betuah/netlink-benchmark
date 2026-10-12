@@ -2,6 +2,7 @@ package integration_test
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -118,6 +119,85 @@ func TestMTULoopback(t *testing.T) {
 	rep := report.Format(res, report.Options{})
 	if !strings.Contains(rep, "Path MTU Discovery") || !strings.Contains(rep, "UDP payload MTU") {
 		t.Fatalf("bad report:\n%s", rep)
+	}
+}
+
+func TestAllModeLoopback(t *testing.T) {
+	s, logs := startServer(t)
+	var phaseLogs []string
+	prog := &bench.Progress{}
+	out := &syncBuffer{}
+	live := report.StartLive(out, prog, report.LiveOptions{TTY: false, Interval: 20 * time.Millisecond})
+	res, err := bench.Run(context.Background(), bench.Config{
+		Mode:          bench.ModeAll,
+		Target:        s.Addr,
+		Duration:      200 * time.Millisecond,
+		Streams:       1,
+		Payload:       16 * 1024,
+		Direction:     bench.DirBoth,
+		Probes:        8,
+		ProbeInterval: 5 * time.Millisecond,
+		ProbeTimeout:  200 * time.Millisecond,
+		Bitrate:       400_000,
+		Packet:        200,
+		LateMs:        150,
+		Progress:      prog,
+		Logf: func(format string, args ...any) {
+			phaseLogs = append(phaseLogs, fmt.Sprintf(format, args...))
+		},
+	})
+	live.Stop()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Mode != bench.ModeAll {
+		t.Fatalf("mode = %q", res.Mode)
+	}
+	if res.Throughput == nil || res.Upload == nil || res.Download == nil {
+		t.Fatalf("throughput incomplete: %+v", res.Throughput)
+	}
+	if res.Stream == nil || res.Stream.PacketsSent < 1 {
+		t.Fatalf("stream = %+v", res.Stream)
+	}
+	if res.MTU == nil || res.MTU.UDPPayload < 100 {
+		t.Fatalf("mtu = %+v", res.MTU)
+	}
+
+	joined := strings.Join(phaseLogs, "\n")
+	for _, want := range []string{"phase 1/3", "phase 2/3", "phase 3/3"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing %q in phase logs:\n%s", want, joined)
+		}
+	}
+	text := out.String()
+	for _, want := range []string{"latency start", "stream start", "mtu start"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q in progress:\n%s", want, text)
+		}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		l := logs.String()
+		if strings.Contains(l, "phase=stream") && strings.Contains(l, "phase=mtu") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("missing session logs:\n%s", l)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	rep := report.Format(res, report.Options{})
+	for _, want := range []string{
+		"  Mode               all",
+		"Latency (UDP)",
+		"Throughput (TCP)",
+		"Stream Stability (UDP CBR)",
+		"Path MTU Discovery (UDP)",
+	} {
+		if !strings.Contains(rep, want) {
+			t.Fatalf("missing %q in report:\n%s", want, rep)
+		}
 	}
 }
 

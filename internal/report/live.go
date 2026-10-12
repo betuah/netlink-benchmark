@@ -134,19 +134,16 @@ func (l *Live) tick(now time.Time) {
 }
 
 // announce prints start/end lines in phase order, so a phase shorter than one
-// tick still gets both.
+// tick still gets both. Lists every possible phase so ModeAll can move from
+// throughput → stream → mtu without sticky Stream.Started hiding later steps.
 func (l *Live) announce(s bench.ProgressSnapshot, now time.Time) {
-	var phases []bench.Phase
-	switch {
-	case s.Stream.Started || s.Phase == bench.PhaseStream:
-		phases = []bench.Phase{bench.PhaseStream}
-	case s.MTU.Started || s.Phase == bench.PhaseMTU:
-		phases = []bench.Phase{bench.PhaseMTU}
-	case s.Bidir:
-		phases = []bench.Phase{bench.PhaseLatency, bench.PhaseBidir}
-	default:
-		phases = []bench.Phase{bench.PhaseLatency, bench.PhaseUpload, bench.PhaseDownload}
+	phases := []bench.Phase{bench.PhaseLatency}
+	if s.Bidir {
+		phases = append(phases, bench.PhaseBidir)
+	} else {
+		phases = append(phases, bench.PhaseUpload, bench.PhaseDownload)
 	}
+	phases = append(phases, bench.PhaseStream, bench.PhaseMTU)
 	for _, ph := range phases {
 		started, finished := phaseState(s, ph)
 		if started && !l.started[ph] {

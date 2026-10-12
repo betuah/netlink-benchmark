@@ -39,6 +39,8 @@ const (
 // Format returns the multi-line report for r, at most 80 columns wide.
 func Format(r bench.Result, opt Options) string {
 	switch r.Mode {
+	case bench.ModeAll:
+		return formatAll(r, opt)
 	case bench.ModeStream:
 		return formatStream(r, opt)
 	case bench.ModeMTU:
@@ -46,6 +48,62 @@ func Format(r bench.Result, opt Options) string {
 	default:
 		return formatThroughput(r, opt)
 	}
+}
+
+func formatAll(r bench.Result, opt Options) string {
+	var b strings.Builder
+	_, section, kv := painters(&b, opt)
+
+	section("npbench report")
+	kv("Mode", "all")
+	kv("Target", r.Target)
+	if !r.StartedAt.IsZero() {
+		kv("Started", r.StartedAt.Format(timeLayout))
+	}
+	if !r.FinishedAt.IsZero() && !r.StartedAt.IsZero() {
+		kv("Total time", seconds(r.FinishedAt.Sub(r.StartedAt)))
+	}
+
+	tp := formatThroughput(bench.Result{
+		Mode:       bench.ModeThroughput,
+		Target:     r.Target,
+		Duration:   r.Duration,
+		Direction:  r.Direction,
+		Streams:    r.Streams,
+		Latency:    r.Latency,
+		Upload:     r.Upload,
+		Download:   r.Download,
+		Total:      r.Total,
+		StartedAt:  r.StartedAt,
+		FinishedAt: r.FinishedAt,
+	}, opt)
+	// Drop the per-mode header block; keep Latency / Throughput sections.
+	if i := strings.Index(tp, "\n\n"); i >= 0 {
+		b.WriteString(tp[i:])
+	} else {
+		b.WriteString("\n")
+		b.WriteString(tp)
+	}
+
+	if r.Stream != nil {
+		st := formatStream(bench.Result{
+			Mode: bench.ModeStream, Target: r.Target, Stream: r.Stream,
+			StartedAt: r.StartedAt, FinishedAt: r.FinishedAt,
+		}, opt)
+		if i := strings.Index(st, "\n\n"); i >= 0 {
+			b.WriteString(st[i:])
+		}
+	}
+	if r.MTU != nil {
+		mt := formatMTU(bench.Result{
+			Mode: bench.ModeMTU, Target: r.Target, MTU: r.MTU,
+			StartedAt: r.StartedAt, FinishedAt: r.FinishedAt,
+		}, opt)
+		if i := strings.Index(mt, "\n\n"); i >= 0 {
+			b.WriteString(mt[i:])
+		}
+	}
+	return b.String()
 }
 
 func formatThroughput(r bench.Result, opt Options) string {

@@ -277,6 +277,47 @@ func TestFormatBidirGolden(t *testing.T) {
 	}
 }
 
+func TestFormatAll(t *testing.T) {
+	start := time.Date(2026, 10, 12, 15, 4, 5, 0, time.FixedZone("WIB", 7*3600))
+	j := 0.5
+	r := bench.Result{
+		Mode:      bench.ModeAll,
+		Target:    "127.0.0.1:9201",
+		Duration:  1,
+		Direction: bench.DirBoth,
+		Streams:   1,
+		Latency: bench.Latency{
+			ProbesSent: 10, ProbesRecv: 10, SuccessRate: 1,
+			RTTMinMs: 0.1, RTTAvgMs: 0.2, RTTMaxMs: 0.3, JitterMs: &j,
+		},
+		Upload:   &bench.Throughput{Direction: bench.DirUpload, Bytes: 1000, Elapsed: 1, ThroughputBps: 1000, Streams: 1},
+		Download: &bench.Throughput{Direction: bench.DirDownload, Bytes: 2000, Elapsed: 1, ThroughputBps: 2000, Streams: 1},
+		Stream: &bench.Stream{
+			BitrateBps: 5_000_000, PacketSize: 1316, DurationSec: 1, LateMs: 150,
+			PacketsSent: 10, PacketsRecv: 10, Verdict: bench.VerdictStable,
+		},
+		MTU: &bench.MTU{
+			UDPPayload: 1472, IPEstimate: 1500, IPVersion: "ipv4",
+			DFEnabled: true, RecommendedOverlay: 1420, RecommendedRelay: 1414,
+		},
+		StartedAt: start, FinishedAt: start.Add(3 * time.Second),
+	}
+	got := report.Format(r, report.Options{})
+	for _, want := range []string{
+		"  Mode               all",
+		"Latency (UDP)",
+		"Throughput (TCP)",
+		"Stream Stability (UDP CBR)",
+		"  Verdict            stable",
+		"Path MTU Discovery (UDP)",
+		"  UDP payload MTU    1472 bytes",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+}
+
 func TestFormatStream(t *testing.T) {
 	start := time.Date(2026, 10, 12, 15, 4, 5, 0, time.FixedZone("WIB", 7*3600))
 	r := bench.Result{

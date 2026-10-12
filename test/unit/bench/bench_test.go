@@ -67,8 +67,31 @@ func TestStreamVerdictOf(t *testing.T) {
 	}
 }
 
+func TestParseMode(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bench.Mode
+	}{
+		{"", bench.ModeAll},
+		{"all", bench.ModeAll},
+		{"throughput", bench.ModeThroughput},
+		{"tcp", bench.ModeThroughput},
+		{"stream", bench.ModeStream},
+		{"mtu", bench.ModeMTU},
+	}
+	for _, c := range cases {
+		got, err := bench.ParseMode(c.in)
+		if err != nil || got != c.want {
+			t.Errorf("ParseMode(%q) = %q, %v; want %q", c.in, got, err, c.want)
+		}
+	}
+	if _, err := bench.ParseMode("laser"); err == nil {
+		t.Fatal("expected bad mode error")
+	}
+}
+
 func TestConfigNormalizeModes(t *testing.T) {
-	for _, m := range []bench.Mode{bench.ModeThroughput, bench.ModeStream, bench.ModeMTU} {
+	for _, m := range []bench.Mode{bench.ModeAll, bench.ModeThroughput, bench.ModeStream, bench.ModeMTU} {
 		c := bench.Config{Target: "x", Mode: m}
 		if err := c.Normalize(); err != nil {
 			t.Fatalf("mode %q: %v", m, err)
@@ -88,6 +111,9 @@ func TestConfigNormalize(t *testing.T) {
 	cfg := bench.Config{Target: "100.64.0.1"}
 	if err := cfg.Normalize(); err != nil {
 		t.Fatal(err)
+	}
+	if cfg.Mode != bench.ModeAll {
+		t.Fatalf("default mode = %q, want all", cfg.Mode)
 	}
 	if cfg.Duration != 10*time.Second || cfg.Streams != 1 || cfg.Direction != bench.DirBoth {
 		t.Fatalf("defaults = %+v", cfg)

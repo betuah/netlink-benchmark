@@ -18,13 +18,13 @@ import (
 func main() {
 	listen := flag.String("listen", "", "serve TCP+UDP on this address (e.g. :9201); omit to run a client")
 	target := flag.String("target", "", "peer overlay host or host:port (e.g. 100.64.0.1)")
-	mode := flag.String("mode", string(bench.ModeThroughput),
-		"throughput (UDP latency + TCP), stream (UDP CBR stability), or mtu (path MTU discovery)")
-	duration := flag.Duration("duration", 10*time.Second, "TCP bulk duration per direction, or stream CBR duration")
-	streams := flag.Int("streams", 1, "parallel TCP connections per direction (throughput mode)")
-	payload := flag.Int("payload", bench.DefaultPayload, "TCP chunk size in bytes (throughput mode)")
-	packet := flag.Int("packet", bench.DefaultStreamPacket, "UDP datagram size in bytes (stream mode; default 1316 = 7×188 MPEG-TS)")
-	bitrate := flag.String("bitrate", "5M", "constant bitrate for stream mode (e.g. 5M, 5000k, 5000000)")
+	mode := flag.String("mode", string(bench.ModeAll),
+		"all (default: throughput then stream then mtu), throughput|tcp (UDP latency + TCP), stream (UDP CBR), or mtu")
+	duration := flag.Duration("duration", 10*time.Second, "TCP bulk duration per direction, and stream CBR duration")
+	streams := flag.Int("streams", 1, "parallel TCP connections per direction (throughput phase)")
+	payload := flag.Int("payload", bench.DefaultPayload, "TCP chunk size in bytes (throughput phase)")
+	packet := flag.Int("packet", bench.DefaultStreamPacket, "UDP datagram size in bytes (stream phase; default 1316 = 7×188 MPEG-TS)")
+	bitrate := flag.String("bitrate", "5M", "constant bitrate for stream phase (e.g. 5M, 5000k, 5000000)")
 	lateMs := flag.Int("late-ms", bench.DefaultLateMs, "stream echo RTT above this counts as late for playback (ms)")
 	direction := flag.String("direction", string(bench.DirBoth),
 		"upload, download, both (upload then download), or bidir (both at the same time)")
@@ -48,9 +48,16 @@ func main() {
 	}
 	if *target == "" {
 		fmt.Fprintln(os.Stderr, "usage: npbench -listen :9201")
-		fmt.Fprintln(os.Stderr, "       npbench -target HOST [-mode throughput|stream|mtu] ...")
+		fmt.Fprintln(os.Stderr, "       npbench -target HOST                    # all phases (default)")
+		fmt.Fprintln(os.Stderr, "       npbench -target HOST -mode throughput")
 		fmt.Fprintln(os.Stderr, "       npbench -target HOST -mode stream -bitrate 5M -duration 30s")
 		fmt.Fprintln(os.Stderr, "       npbench -target HOST -mode mtu")
+		os.Exit(2)
+	}
+
+	parsedMode, err := bench.ParseMode(*mode)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "npbench:", err)
 		os.Exit(2)
 	}
 
@@ -61,7 +68,7 @@ func main() {
 	}
 
 	cfg := bench.Config{
-		Mode:          bench.Mode(*mode),
+		Mode:          parsedMode,
 		Target:        *target,
 		Duration:      *duration,
 		Streams:       *streams,
@@ -72,6 +79,11 @@ func main() {
 		Direction:     bench.Direction(*direction),
 		Probes:        *probes,
 		ProbeInterval: *probeInterval,
+	}
+	if !*quiet {
+		cfg.Logf = func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "npbench: "+format+"\n", args...)
+		}
 	}
 	if err := cfg.Normalize(); err != nil {
 		fmt.Fprintln(os.Stderr, "npbench:", err)
